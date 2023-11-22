@@ -37,6 +37,7 @@ library
     Database.LSMTree.Internal.KMerge
     Database.LSMTree.Internal.Run
     Database.LSMTree.Internal.Run.BloomFilter
+    Database.LSMTree.Internal.Run.Index.Basic
     Database.LSMTree.Internal.Run.Index.Compact
     Database.LSMTree.Internal.WriteBuffer
     Database.LSMTree.Monoidal

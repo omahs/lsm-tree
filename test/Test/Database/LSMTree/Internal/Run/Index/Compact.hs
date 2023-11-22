@@ -5,6 +5,7 @@ module Test.Database.LSMTree.Internal.Run.Index.Compact (tests) where
 
 import           Data.List (nub, sort)
 import           Data.Word (Word64)
+import qualified Database.LSMTree.Internal.Run.Index.Basic as Basic
 import           Database.LSMTree.Internal.Run.Index.Compact
 import           Test.QuickCheck
 import           Test.Tasty (TestTree, testGroup)
@@ -26,6 +27,13 @@ tests = testGroup "Test.Database.LSMTree.Internal.Run.Index.Compact" [
         ]
     , testProperty "prop_searchMinMaxKeysAfterConstruction" $
         prop_searchMinMaxKeysAfterConstruction @Word64
+    , testProperty "prop_searchMatchesModel" $
+        prop_searchMatchesModel @Word64
+      -- cabal run lsm-tree-test -- -p prop_searchMatchesModel --quickcheck-tests=100000 --quickcheck-max-size=1000 --quickcheck-replay=430453
+    , testProperty "regress" $
+        prop_searchMatchesModel @Word64
+          (PartitionedPages {getRangeFinderPrecision = RFPrecision 0, getPartitionedPages = [(0,1),(9250810581454159873,9250810581454159874)]})
+          [9250810581454159872]
     ]
 
 {-------------------------------------------------------------------------------
@@ -61,7 +69,37 @@ prop_searchMinMaxKeysAfterConstruction (PartitionedPages (RFPrecision rfprec) ks
     p (idx, x, y, z) =
          Just idx == x && Just idx == y && Just idx == z
 
--- TODO: test for arbitrary keys instead of only min and max keys on pages.
+-- | The result of searching for a key in a compact index matches the result of
+-- searching for a key in a modelled index.
+prop_searchMatchesModel ::
+     (SliceBits k, Integral k, Show k)
+  => PartitionedPages k
+  -> [k]
+  -> Property
+prop_searchMatchesModel (PartitionedPages (RFPrecision rfprec) ks) searchKs =
+      classify (hasClashes ci) "Compact index contains clashes"
+    $ tabulate "Range-finder bit-precision" [show rfprec]
+    $ counterexample (dumpInternals ci)
+    $ counterexample (show searchResults)
+    $ property $ all p searchResults
+  where
+    bi = Basic.fromList ks
+    ci = fromList rfprec ks
+
+    searchResults = fmap (\k -> ( k
+                                , printWord16 $ topBits16 rfprec k
+                                , printWord32 $ sliceBits32 rfprec 32 k
+                                , Basic.search k bi
+                                , search k ci
+                                )) searchKs
+
+    -- Approximation: the model may provide more precise results than the
+    -- compact index.
+    p (_k, _, _, biResult, ciResult) = case biResult of
+      -- If the model provides a more precise results, the property is trivially
+      -- true.
+      Nothing -> True
+      _       -> biResult == ciResult
 
 {-------------------------------------------------------------------------------
   Range-finder precision
@@ -73,11 +111,12 @@ newtype RFPrecision = RFPrecision Int
 instance Arbitrary RFPrecision where
   arbitrary = RFPrecision <$>
       (arbitrary `suchThat` (\x -> x >= rfprecLB && x <= rfprecUB))
+    where
+      (rfprecLB, rfprecUB) = rangeFinderPrecisionBounds
   shrink (RFPrecision x) = [RFPrecision x' | x' <- shrink x
                                            , x' >= rfprecLB && x' <= rfprecUB]
-
-rfprecLB, rfprecUB :: Int
-(rfprecLB, rfprecUB) = rangeFinderPrecisionBounds
+    where
+      (rfprecLB, rfprecUB) = rangeFinderPrecisionBounds
 
 {-------------------------------------------------------------------------------
   Pages (non-partitioned)
@@ -142,12 +181,19 @@ mkPartitionedPages ::
   => RFPrecision
   -> Pages k
   -> PartitionedPages k
-mkPartitionedPages rfprec (Pages ks) = PartitionedPages rfprec $ filter f ks
-  where f (kmin, kmax) = topBits16 rfprecUB kmin == topBits16 rfprecUB kmax
+mkPartitionedPages rfprec0@(RFPrecision rfprec) (Pages ks) =
+    PartitionedPages rfprec0 $ foldr f [] ks
+  where f (kmin, kmax)   []                          = [(kmin, kmax)]
+        f ks1@(kmin1, kmax1) ps@((kmin2, _kmax2) : _)
+          | topBits16 rfprec kmin1 <  topBits16 rfprec kmax1
+          , topBits16 rfprec kmax1 == topBits16 rfprec kmin2 = ps
+          | otherwise                                        = ks1 : ps
 
 partitionedPagesInvariant :: (SliceBits k, Integral k) => PartitionedPages k -> Bool
 partitionedPagesInvariant (PartitionedPages (RFPrecision rfprec) ks) =
     pagesInvariant (Pages ks) && properPartitioning
   where
-    properPartitioning = all p ks
-    p (kmin, kmax) = topBits16 rfprec kmin == topBits16 rfprec kmax
+    properPartitioning = and (zipWith p ks $ drop 1 ks)
+    p (kmin1, kmax1) (kmin2, _kmax2) = not $
+         topBits16 rfprec kmin1 <  topBits16 rfprec kmax1
+      && topBits16 rfprec kmax1 == topBits16 rfprec kmin2
