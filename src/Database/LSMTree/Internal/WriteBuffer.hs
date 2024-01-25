@@ -23,6 +23,8 @@
 module Database.LSMTree.Internal.WriteBuffer (
     WriteBuffer,
     emptyWriteBuffer,
+    numEntries,
+    content,
     addEntryMonoidal,
     addEntryNormal,
     lookups,
@@ -45,6 +47,12 @@ newtype WriteBuffer k v blobref = WB (Map k (Entry v blobref))
 
 emptyWriteBuffer :: WriteBuffer k v blobref
 emptyWriteBuffer = WB Map.empty
+
+numEntries :: WriteBuffer k v blobref -> Int
+numEntries (WB m) = Map.size m
+
+content :: WriteBuffer k v blobref -> [(k, Entry v blobref)]
+content (WB m) = Map.assocs m
 
 {-------------------------------------------------------------------------------
   Updates

@@ -10,6 +10,7 @@
 module Database.LSMTree.Util.Orphans () where
 
 import           Control.DeepSeq (NFData (..))
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Short.Internal as SBS
@@ -46,29 +47,23 @@ instance Hashable Word256 where
 
 instance Serialise Word256 where
   serialise (Word256{word256hi, word256m1, word256m0, word256lo}) =
-      fromByteString $ B.toLazyByteString $ mconcat [
+      serialise $ LBS.toStrict $ B.toLazyByteString $ mconcat [
           B.word64BE word256hi
         , B.word64BE word256m1
         , B.word64BE word256m0
         , B.word64BE word256lo
         ]
-    where
-      fromByteString :: LBS.ByteString -> SerialisedKey
-      fromByteString =
-            fromShortByteString
-          . SBS.toShort
-          . LBS.toStrict
 
 {-------------------------------------------------------------------------------
   Word64
 -------------------------------------------------------------------------------}
 
 instance Serialise Word64 where
-  serialise x =
-      fromByteString $ B.toLazyByteString $ B.word64BE x
-    where
-      fromByteString :: LBS.ByteString -> SerialisedKey
-      fromByteString =
-            fromShortByteString
-          . SBS.toShort
-          . LBS.toStrict
+  serialise = serialise . LBS.toStrict . B.toLazyByteString . B.word64BE
+
+{-------------------------------------------------------------------------------
+  ByteString
+-------------------------------------------------------------------------------}
+
+instance Serialise BS.ByteString where
+  serialise = fromShortByteString . SBS.toShort

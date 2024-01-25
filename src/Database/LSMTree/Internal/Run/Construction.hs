@@ -19,6 +19,7 @@ module Database.LSMTree.Internal.Run.Construction (
   , addChunkedKOp
     -- * Types
   , RawValue (RawValue, EmptyRawValue)
+  , rawValueFromShortByteString
   , BlobRef (..)
     -- * Pages
     -- ** Page Builder
@@ -224,6 +225,10 @@ pattern RawValue start end ba <- UnsafeRawValue start end ba
   where RawValue start end ba =
           assert (0 <= start && start <= end && end <= sizeofByteArray ba) $
           UnsafeRawValue start end ba
+
+rawValueFromShortByteString :: ShortByteString -> RawValue
+rawValueFromShortByteString (SBS ba#) =
+  let ba = ByteArray ba# in UnsafeRawValue 0 (sizeofByteArray ba) ba
 
 -- | Size of value in number of bytes.
 sizeofValue :: RawValue -> Int
