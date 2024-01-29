@@ -21,11 +21,24 @@ import qualified Control.Concurrent.MVar as Real
 import qualified Control.Concurrent.STM as Real
 import           Control.Monad ((<=<))
 import           Control.Monad.IOSim (IOSim)
+import           Data.Bifunctor (first)
+import           Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import           Data.Kind (Type)
+import qualified Data.Map as Map
+import           Database.LSMTree.Common
+import           Database.LSMTree.Internal.BlobRef
+import           Database.LSMTree.Internal.Entry
 import           Database.LSMTree.Internal.Serialise (Serialise)
+import           Database.LSMTree.Internal.WriteBuffer (WriteBuffer (..))
+import qualified Database.LSMTree.Internal.WriteBuffer as WB
 import qualified Database.LSMTree.Monoidal as Monoidal
-import           Database.LSMTree.Normal
-import           Test.QuickCheck (Arbitrary (..), frequency, oneof)
+import           Database.LSMTree.Normal (LookupResult, RangeLookupResult,
+                     TableHandle)
+import qualified Database.LSMTree.Normal as Normal
+import qualified Test.QuickCheck as QC
+import           Test.QuickCheck (Arbitrary (..), Arbitrary1 (..),
+                     Arbitrary2 (..), frequency, oneof)
 import           Test.QuickCheck.Instances ()
 import           Test.QuickCheck.Modifiers
 import           Test.QuickCheck.StateModel (Realized)
@@ -39,31 +52,81 @@ import           Test.Util.TypeFamilyWrappers (WrapBlob (..), WrapBlobRef (..),
   Common LSMTree types
 -------------------------------------------------------------------------------}
 
-instance (Arbitrary v, Arbitrary blob) => Arbitrary (Update v blob) where
-  arbitrary = frequency
-    [ (10, Insert <$> arbitrary <*> arbitrary)
-    , (1, pure Delete)
+instance (Arbitrary v, Arbitrary blob) => Arbitrary (Normal.Update v blob) where
+  arbitrary = QC.arbitrary2
+  shrink = QC.shrink2
+
+instance Arbitrary2 Normal.Update where
+  liftArbitrary2 genVal genBlob = frequency
+    [ (10, Normal.Insert <$> genVal <*> oneof [pure Nothing, Just <$> genBlob])
+    , (1, pure Normal.Delete)
     ]
 
-  shrink (Insert v blob) = Delete : map (uncurry Insert) (shrink (v, blob))
-  shrink Delete          = []
+  liftShrink2 shrinkVal shrinkBlob = \case
+    Normal.Insert v blob -> Normal.Delete : map (uncurry Normal.Insert) (liftShrink2 shrinkVal (liftShrink shrinkBlob) (v, blob))
+    Normal.Delete        -> []
 
 instance (Arbitrary v) => Arbitrary (Monoidal.Update v) where
-  arbitrary = frequency
-    [ (10, Monoidal.Insert <$> arbitrary)
-    , (5, Monoidal.Mupsert <$> arbitrary)
+  arbitrary = QC.arbitrary1
+  shrink = QC.shrink1
+
+instance Arbitrary1 Monoidal.Update where
+  liftArbitrary genVal = frequency
+    [ (10, Monoidal.Insert <$> genVal)
+    , (5, Monoidal.Mupsert <$> genVal)
     , (1, pure Monoidal.Delete)
     ]
 
-  shrink (Monoidal.Insert v)  = Monoidal.Delete : map Monoidal.Insert (shrink v)
-  shrink (Monoidal.Mupsert v) = Monoidal.Insert v : map Monoidal.Mupsert (shrink v)
-  shrink Monoidal.Delete      = []
+  liftShrink shrinkVal = \case
+    Monoidal.Insert v  -> Monoidal.Delete : map Monoidal.Insert (shrinkVal v)
+    Monoidal.Mupsert v -> Monoidal.Insert v : map Monoidal.Mupsert (shrinkVal v)
+    Monoidal.Delete    -> []
 
 instance Arbitrary k => Arbitrary (Range k) where
   arbitrary = oneof
     [ FromToExcluding <$> arbitrary <*> arbitrary
     , FromToIncluding <$> arbitrary <*> arbitrary
     ]
+
+instance Arbitrary2 Entry where
+  liftArbitrary2 genVal genBlob = frequency
+    [ (10, Insert <$> genVal)
+    , (1,  InsertWithBlob <$> genVal <*> genBlob)
+    , (1,  Mupdate <$> genVal)
+    , (1,  pure Delete)
+    ]
+
+  liftShrink2 shrinkVal shrinkBlob = \case
+    Insert v           -> Delete : (Insert <$> shrinkVal v)
+    InsertWithBlob v b -> [Delete, Insert v]
+                       ++ [ InsertWithBlob v' b'
+                          | (v', b') <- liftShrink2 shrinkVal shrinkBlob (v, b)
+                          ]
+    Mupdate v          -> Delete : Insert v : (Mupdate <$> shrinkVal v)
+    Delete             -> []
+
+-- | Assuming that keys are bytestrings gives us control over their length.
+--
+instance Arbitrary2 (WriteBuffer ByteString) where
+  liftArbitrary2 genVal genBlob = do
+    keyLen <- QC.chooseInt (4, 128)  -- TODO: which conditions on keys?
+    let genKey = BS.pack <$> QC.vector keyLen
+    let genEntry = liftArbitrary2 genVal genBlob
+    WB . Map.fromList <$> QC.listOf (liftArbitrary2 genKey genEntry)
+
+  liftShrink2 shrinkVal shrinkBlob wb =
+      -- decrease key length, makes output much more readable
+      [ (WB . Map.fromList) (map (first (BS.take keyLen')) kops)
+      | (firstKey, _) : _ <- [kops]
+      , keyLen' <- [4..(BS.length firstKey - 1)]
+      ]
+      -- shrink everything else
+   ++ map (WB . Map.fromList)
+      (liftShrink (liftShrink2 mempty (liftShrink2 shrinkVal shrinkBlob)) kops)
+    where
+      kops = WB.content wb
+
+
 
 {-------------------------------------------------------------------------------
   IOSim

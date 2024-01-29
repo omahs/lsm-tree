@@ -68,6 +68,8 @@ tests = testGroup "Database.LSMTree.Internal.RawPage"
         rawPageOpAt page 0 @=? 0
         rawPageKeys page @=? V.singleton (P.fromList [0x42, 0x43])
 
+        rawPageEntry page (P.fromList [0x42, 0x43]) @=? Just (Entry.Insert (P.fromList [0x88, 0x99]))
+
     , testCase "single-insert-blobref" $ do
         let bytes :: [Word16]
             bytes =
@@ -95,6 +97,8 @@ tests = testGroup "Database.LSMTree.Internal.RawPage"
         rawPageOpAt page 0 @=? 0
         rawPageKeys page @=? V.singleton (P.fromList [0x42, 0x43])
 
+        rawPageEntry page (P.fromList [0x42, 0x43]) @=? Just (Entry.InsertWithBlob (P.fromList [0x88, 0x99]) (0xff, 0xfe))
+
     , testCase "single-delete" $ do
         let bytes :: [Word16]
             bytes =
@@ -116,6 +120,8 @@ tests = testGroup "Database.LSMTree.Internal.RawPage"
         rawPageHasBlobRefAt page 0 @=? 0
         rawPageOpAt page 0 @=? 2
         rawPageKeys page @=? V.singleton (P.fromList [0x42, 0x43])
+
+        rawPageEntry page (P.fromList [0x42, 0x43]) @=? Just Entry.Delete
 
     , testCase "double-mupsert" $ do
         let bytes :: [Word16]

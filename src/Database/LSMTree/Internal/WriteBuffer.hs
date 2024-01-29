@@ -21,7 +21,7 @@
 -- not exhaustive.
 --
 module Database.LSMTree.Internal.WriteBuffer (
-    WriteBuffer,
+    WriteBuffer (..),
     emptyWriteBuffer,
     numEntries,
     content,
@@ -44,6 +44,7 @@ import qualified Database.LSMTree.Internal.Normal as Normal
 -------------------------------------------------------------------------------}
 
 newtype WriteBuffer k v blobref = WB (Map k (Entry v blobref))
+  deriving (Show)
 
 emptyWriteBuffer :: WriteBuffer k v blobref
 emptyWriteBuffer = WB Map.empty
