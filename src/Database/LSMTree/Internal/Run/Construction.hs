@@ -12,12 +12,8 @@
 -- | Incremental, in-memory run consruction
 --
 module Database.LSMTree.Internal.Run.Construction (
-    -- * Types
-    RawValue (RawValue, EmptyRawValue)
-  , BlobRef (..)
-    -- * Pages
     -- ** Page Builder
-  , pageBuilder
+    pageBuilder
     -- **  Page accumulator
   , PageAcc
   , paIsEmpty
@@ -43,60 +39,13 @@ module Database.LSMTree.Internal.Run.Construction (
 import           Control.Exception (assert)
 import           Data.Bits (Bits (..))
 import qualified Data.ByteString.Builder as BB
-import           Data.ByteString.Short.Internal (ShortByteString (SBS))
 import           Data.Foldable (Foldable (..))
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid (Dual (..))
-import           Data.Primitive.ByteArray (ByteArray (..), sizeofByteArray)
 import           Data.Word (Word16, Word32, Word64, Word8)
 import           Database.LSMTree.Internal.Entry (Entry (..), onBlobRef,
                      onValue)
-import           Database.LSMTree.Internal.Serialise (SerialisedKey,
-                     serialisedKey, shortByteStringFromTo, sizeofKey16,
-                     sizeofKey64, topBits16)
-
-{-------------------------------------------------------------------------------
-  Types
--------------------------------------------------------------------------------}
-
--- | A string of raw bytes representing a value.
---
--- Can also double as a representation for a chunk of a value.
-data RawValue =
-    UnsafeRawValue !Int !Int ByteArray
-  | EmptyRawValue
-  deriving Show
-
-{-# COMPLETE EmptyRawValue, RawValue #-}
-pattern RawValue :: Int -> Int -> ByteArray -> RawValue
-pattern RawValue start end ba <- UnsafeRawValue start end ba
-  where RawValue start end ba =
-          assert (0 <= start && start <= end && end <= sizeofByteArray ba) $
-          UnsafeRawValue start end ba
-
--- | Size of value in number of bytes.
-sizeofValue :: RawValue -> Int
-sizeofValue EmptyRawValue          = 0
-sizeofValue (RawValue start end _) = end - start
-
--- | Size of value in number of bytes.
-sizeofValue16 :: RawValue -> Word16
-sizeofValue16 = fromIntegral . sizeofValue
-
--- | Size of value in number of bytes.
-sizeofValue32 :: RawValue -> Word32
-sizeofValue32 = fromIntegral . sizeofValue
-
--- | Size of value in number of bytes.
-sizeofValue64 :: RawValue -> Word64
-sizeofValue64 = fromIntegral . sizeofValue
-
--- | TODO: replace this placeholder type by the actual blob reference type.
-data BlobRef = BlobRef {
-    blobRefOffset :: !Word64
-  , blobRefSize   :: !Word32
-  }
-  deriving Show
+import           Database.LSMTree.Internal.Serialise
 
 {-------------------------------------------------------------------------------
   Page builder
@@ -136,7 +85,7 @@ pageBuilder PageAcc{..} =
     -- (7) the concatenation of all keys
     <> dfoldMap serialisedKey pageKeys
     -- (8) the concatenation of all values
-    <> dfoldMap rawValue pageValues
+    <> dfoldMap (maybe mempty serialisedValue) pageValues
     -- padding
     <> fold (replicate (fromIntegral paddingBytes) (BB.word8 0))
   where
@@ -167,12 +116,8 @@ pageBuilder PageAcc{..} =
           (vo : kos) -> (kos, vo)
 
     pageValueOffsets = case unStricterList pageValues of
-      [v] -> Right (offValues, fromIntegral offValues + sizeofValue32 v)
-      vs  -> Left (scanr (\v o -> o + sizeofValue16 v) offValues vs)
-
-    rawValue :: RawValue -> BB.Builder
-    rawValue EmptyRawValue                  = mempty
-    rawValue (RawValue i j (ByteArray ba#)) = shortByteStringFromTo i j (SBS ba#)
+      [v] -> Right (offValues, fromIntegral offValues + maybe 0 sizeofValue32 v)
+      vs  -> Left (scanr (\v o -> o + maybe 0 sizeofValue16 v) offValues vs)
 
     paddingBytes :: Word64
     paddingBytes | bytesRemaining == 0 = 0
@@ -217,9 +162,9 @@ data PageAcc = PageAcc {
     -- | (7) the concatenation of all keys
   , pageKeys             :: !(StricterList SerialisedKey)
     -- | (8) the concatenation of all values
-  , pageValues           :: !(StricterList RawValue)
+  , pageValues           :: !(StricterList (Maybe SerialisedValue))
   }
-  deriving Show
+  deriving (Show, Eq)
 
 paIsEmpty :: PageAcc -> Bool
 paIsEmpty p = psIsEmpty (pageSize p)
@@ -241,7 +186,7 @@ paEmpty rangeFinderPrecision = PageAcc {
 
 paAddElem ::
      SerialisedKey
-  -> Entry RawValue BlobRef
+  -> Entry SerialisedValue (Word64, Word32)
   -> PageAcc
   -> Maybe PageAcc
 paAddElem k e PageAcc{..}
@@ -252,16 +197,16 @@ paAddElem k e PageAcc{..}
       , pageSize           = pgsz'
       , pageBlobRefBitmap  = pageBlobRefBitmap'
       , pageOperations     = pageOperations'
-      , pageBlobRefOffsets = onBlobRef pageBlobRefOffsets ((`SCons` pageBlobRefOffsets ) . blobRefOffset) e
-      , pageBlobRefSizes   = onBlobRef pageBlobRefSizes ((`SCons` pageBlobRefSizes) . blobRefSize) e
+      , pageBlobRefOffsets = onBlobRef pageBlobRefOffsets ((`SCons` pageBlobRefOffsets ) . fst) e
+      , pageBlobRefSizes   = onBlobRef pageBlobRefSizes ((`SCons` pageBlobRefSizes) . snd) e
       , pageKeys           = k `SCons` pageKeys
-      , pageValues         = onValue EmptyRawValue id e `SCons` pageValues
+      , pageValues         = onValue Nothing Just e `SCons` pageValues
       }
   | otherwise = Nothing
   where
     partitioned = case unStricterList pageKeys of
         []     -> True
-        k' : _ -> topBits16 rangeFinderPrecision k == topBits16 rangeFinderPrecision k'
+        k' : _ -> keyTopBits16 rangeFinderPrecision k == keyTopBits16 rangeFinderPrecision k'
 
     pageBlobRefBitmap' = appendBit (onBlobRef 0 (const 1) e) pageBlobRefBitmap
     pageOperations'    = appendCrumb (entryToCrumb e) pageOperations
@@ -271,8 +216,9 @@ paAddElem k e PageAcc{..}
     entryToCrumb Mupdate{}        = 1
     entryToCrumb Delete{}         = 2
 
-paSingleton :: Int -> SerialisedKey -> Entry RawValue BlobRef -> PageAcc
-paSingleton rfp k e = fromMaybe (error err) $ paAddElem k e (paEmpty rfp)
+paSingleton :: Int -> SerialisedKey -> Entry SerialisedValue (Word64, Word32) -> PageAcc
+paSingleton rfp k e = fromMaybe (error err) $
+    paAddElem k e (paEmpty rfp)
   where
     err = "Failed to add k/op pair to an empty page, but this should have \
           \worked! Are you sure the implementation of paAddElem is correct?"
@@ -298,7 +244,11 @@ psIsEmpty ps = ps == psEmpty
 psIsOverfull :: PageSize -> Bool
 psIsOverfull ps = pageSizeNumBytes ps >= 4096
 
-psAddElem :: SerialisedKey -> Entry RawValue BlobRef -> PageSize -> Maybe PageSize
+psAddElem ::
+     SerialisedKey
+  -> Entry SerialisedValue (Word64, Word32)
+  -> PageSize
+  -> Maybe PageSize
 psAddElem k e (PageSize n b sz)
   | sz' <= 4096 || n' == 1 = Just $! PageSize n' b' sz'
   | otherwise              = Nothing
@@ -315,7 +265,7 @@ psAddElem k e (PageSize n b sz)
         + sizeofKey64 k                         -- (7) key bytes
         + onValue 0 sizeofValue64 e             -- (8) value bytes
 
-_psSingleton :: SerialisedKey -> Entry RawValue BlobRef -> PageSize
+_psSingleton :: SerialisedKey -> Entry SerialisedValue (Word64, Word32) -> PageSize
 _psSingleton k e = fromMaybe (error err) $ psAddElem k e psEmpty
   where
     err = "Failed to add k/op pair to an empty page, but this should have \
