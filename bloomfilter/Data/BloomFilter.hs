@@ -37,7 +37,7 @@ module Data.BloomFilter
 
     -- * Types
       Hash
-    , Bloom
+    , Bloom (..)
     , MBloom
 
     -- * Immutable Bloom filters
